@@ -1,26 +1,9 @@
 version: '2'
 services:
-  python:
-    build: ./python/
-    container_name: python-energy-api
-    depends_on:
-    - influxdb
-    environment:
-      - ENERGY_START=2024-05-27
-      - ENERGY_USER=${ENERGY_USER}
-      - ENERGY_PASSWORD=${ENERGY_PASSWORD}
-      - INFLUXDB_TOKEN=${INFLUXDB_ADMIN_TOKEN}
-      - INFLUXDB_URL=http://influxdb:8086
-      - INFLUXDB_ORG=${INFLUXDB_ORG}
-      - INFLUXDB_BUCKET=${INFLUXDB_BUCKET}
-      - DEBUG=False
   influxdb:
     image: influxdb:2
     ports:
       - '8086:8086'
-    volumes:
-      - influxdb-data:/var/lib/influxdb2
-      - ./influxdb-config:/etc/influxdb2"
     environment:
       - DOCKER_INFLUXDB_INIT_MODE=setup
       - DOCKER_INFLUXDB_INIT_USERNAME=${INFLUXDB_USERNAME}
@@ -29,6 +12,38 @@ services:
       - DOCKER_INFLUXDB_INIT_BUCKET=${INFLUXDB_BUCKET}
       - DOCKER_INFLUXDB_INIT_RETENTION=${INFLUXDB_RETENTION}
       - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUXDB_ADMIN_TOKEN}
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+      - INFLUXDB_ORG=${INFLUXDB_ORG}
+      - INFLUXDB_BUCKET=${INFLUXDB_BUCKET}
+      - INFLUXDB_TOKEN=${INFLUXDB_ADMIN_TOKEN}
+
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./dashboards:/var/lib/grafana/dashboards
+      - ./provisioning:/etc/grafana/provisioning
+    depends_on:
+      - influxdb
+  python:
+    build: ./python/
+    environment:
+      - ENERGY_START=2024-05-27
+      - ENERGY_USER=${ENERGY_USER}
+      - ENERGY_PASSWORD=${ENERGY_PASSWORD}
+      - INFLUXDB_TOKEN=${INFLUXDB_ADMIN_TOKEN}
+      - INFLUXDB_ORG=${INFLUXDB_ORG}
+      - INFLUXDB_BUCKET=${INFLUXDB_BUCKET}
+      - DEBUG=${DEBUGe}
+    depends_on:
+    - influxdb
 
 volumes:
   influxdb-data:
+  grafana-data:
