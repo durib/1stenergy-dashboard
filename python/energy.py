@@ -1,31 +1,15 @@
 import os
 import time
+import logging
 import schedule
 import requests
 from datetime import datetime, timedelta
 from influxdb_client import InfluxDBClient
 from influxdb_client.client.write_api import SYNCHRONOUS
 
-# Get environment variables
-start_date = datetime.strptime(os.environ["ENERGY_START"], "%Y-%m-%d")
-bucket = os.environ["INFLUXDB_BUCKET"]
-org = os.environ["INFLUXDB_ORG"]
-
-# Setup InfluxDB client
-influx_client = InfluxDBClient(
-    url=os.environ["INFLUXDB_URL"],
-    token=os.environ["INFLUXDB_TOKEN"],
-    org=org,
-    debug=os.environ["DEBUG"]
-)
-write_api = influx_client.write_api(write_options=SYNCHRONOUS)
-
-# 1stenergy login credentials
-energy_login = {
-    "userName": os.environ["ENERGY_USER"],
-    "password": os.environ["ENERGY_PASSWORD"]
-}
-
+# Convert the string to a boolean
+def str_to_bool(value):
+    return value.lower() in ('true', '1', 't', 'y', 'yes')
 
 # get 1stenergy token using login
 def energy_get_token(login):
@@ -91,7 +75,7 @@ def convert_to_data_points(data):
 
 
 # get oldest last record from all tables based on measurement
-def influx_get_last(measurement):
+def influx_get_last(influx_client,measurement):
     query_api = influx_client.query_api()
     query = f'from(bucket: "{bucket}") |> range(start: 0) |> filter(fn: (r) => r._measurement == "{measurement}") |> last()'
     tables = query_api.query(query, org=org)
@@ -99,27 +83,63 @@ def influx_get_last(measurement):
 
 
 def job():
-    print("Task is running...")
+    logger.info("Sync task is starting...")
+
+    # Setup InfluxDB client
+    influx_client = InfluxDBClient(
+        url=os.getenv("INFLUXDB_URL","http://influxdb:8086"),
+        token=os.getenv("INFLUXDB_TOKEN"),
+        org=org,
+        debug=str_to_bool(os.getenv("DEBUG", 'false'))
+    )
+    write_api = influx_client.write_api(write_options=SYNCHRONOUS)
+    logger.info("Connecting to InfluxDB v2 on " + influx_client.url)
+
     energy_token = energy_get_token(energy_login)
     energy_account = energy_get_account(energy_token)
-    last_time = influx_get_last("electricity")
+    last_time = influx_get_last(influx_client, "electricity")
 
     if last_time is None:
         next_date = start_date
-        print(f"No last date found, using start_date: {next_date.strftime('%Y-%m-%d')}")
+        logger.info(f"No last date found, using start_date: {next_date.strftime('%Y-%m-%d')}")
     else:
         next_date = last_time + timedelta(hours=10) + timedelta(minutes=5)
-        print(f"Last date found, starting at: {next_date.strftime('%Y-%m-%d')}")
+        logger.info(f"Last date found, starting at: {next_date.strftime('%Y-%m-%d')}")
 
     # get data from 1stenergy
     while next_date.date() < datetime.now().date():
-        print(f"Getting energy data for: {next_date.date().strftime('%Y-%m-%d')}")
+        logger.info(f"Getting energy data for: {next_date.date().strftime('%Y-%m-%d')}")
         energy_data = energy_get_data(energy_account, energy_token, next_date)
         energy_data["date"] = next_date.strftime("%Y-%m-%d")
         data_points = convert_to_data_points(energy_data)
         write_api.write(org=org, bucket=bucket, record=data_points)
         next_date += timedelta(days=1)
 
+    logger.info("Sync task complete.")
+
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s %(message)s',
+    handlers=[
+        logging.StreamHandler()  # Log to stdout
+    ]
+)
+logger = logging.getLogger(__name__)
+logger.info("Starting energy scraper...")
+
+# Get environment variables
+start_date = datetime.strptime(os.getenv("ENERGY_START"), "%Y-%m-%d")
+bucket = os.getenv("INFLUXDB_BUCKET")
+org = os.getenv("INFLUXDB_ORG")
+
+# 1stenergy login credentials
+energy_login = {
+    "userName": os.getenv("ENERGY_USER"),
+    "password": os.getenv("ENERGY_PASSWORD")
+}
+logger.info("Usign login details for " + os.getenv("ENERGY_USER"))
 
 # Run job at startup
 job()
@@ -128,4 +148,5 @@ job()
 schedule.every().day.at("05:00").do(job)
 while True:
     schedule.run_pending()
+    logger.info("Sleeping for 1h")
     time.sleep(3600)
