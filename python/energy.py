@@ -58,9 +58,16 @@ def energy_get_data(account, token, date):
     response.raise_for_status()
     return response.json()
 
+# get 1stenergy usage data
+def energy_get_offerings(account, token):
+    headers = {"Authorization": f"Bearer {token}"}
+    url = f"https://portal-api.1stenergy.com.au/api/product-offerings/{account}?"
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    return response.json()
 
-# Convert JSON data to InfluxDB data points
-def convert_to_data_points(data):
+# Convert JSON data to InfluxDB energy points
+def energy_to_points(data):
     data_points = []
     for series in data["series"]:
         for reading in series["data"]:
@@ -71,6 +78,19 @@ def convert_to_data_points(data):
                 "time": f"{data['date']}T{reading['category']}:00+10:00"
             }
             data_points.append(point)
+    return data_points
+
+# Convert JSON data to InfluxDB offerings points
+def offerings_to_points(data):
+    data_points = []
+    for rate in data["rates"]:
+        point = {
+            "measurement": "cost",
+            "tags": {"description": rate["description"],"class": rate["priceClass"],"unit": rate["unitOfMeasure"]},
+            "fields": {"value": rate["rate"]},
+            "time": f"{data['date']}T10:00"
+        }
+        data_points.append(point)
     return data_points
 
 
@@ -111,8 +131,15 @@ def job():
         logger.info(f"Getting energy data for: {next_date.date().strftime('%Y-%m-%d')}")
         energy_data = energy_get_data(energy_account, energy_token, next_date)
         energy_data["date"] = next_date.strftime("%Y-%m-%d")
-        data_points = convert_to_data_points(energy_data)
+        data_points = energy_to_points(energy_data)
         write_api.write(org=org, bucket=bucket, record=data_points)
+
+        logger.info(f"Getting offerings data")
+        offerings = energy_get_offerings(energy_account, energy_token)
+        offerings["date"] = next_date.strftime("%Y-%m-%d")
+        data_points = offerings_to_points(offerings)
+        write_api.write(org=org, bucket=bucket, record=data_points)
+
         next_date += timedelta(days=1)
 
     logger.info("Sync task complete.")
