@@ -11,6 +11,19 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 def str_to_bool(value):
     return value.lower() in ('true', '1', 't', 'y', 'yes')
 
+# Determine if the given date and time is during peak or off-peak hours.
+def get_peak_status(date_time):
+    # Convert input to datetime object if it's not already
+    if isinstance(date_time, str):
+        date_time = datetime.strptime(date_time, '%Y-%m-%d %H:%M:%S')
+    
+    day_of_week = date_time.weekday()
+    hour = date_time.hour
+    
+    if day_of_week >= 5: return "Off-peak"
+    if (7 <= hour < 10) or (16 <= hour < 21): return "Peak"
+    return "Off-peak"
+
 # get 1stenergy token using login
 def energy_get_token(login):
     headers = {
@@ -71,11 +84,12 @@ def energy_to_points(data):
     data_points = []
     for series in data["series"]:
         for reading in series["data"]:
+            reading_time = datetime.strptime(f"{data['date']}T{reading['category']}:00+10:00", '%Y-%m-%dT%H:%M:%S%z')
             point = {
                 "measurement": "electricity",
-                "tags": {"tariff": series["name"]},
+                "tags": {"tariff": series["name"], "timeofuse": get_peak_status(reading_time)},
                 "fields": {"value": reading["value"]},
-                "time": f"{data['date']}T{reading['category']}:00+10:00"
+                "time": reading_time
             }
             data_points.append(point)
     return data_points
@@ -84,13 +98,14 @@ def energy_to_points(data):
 def offerings_to_points(data):
     data_points = []
     for rate in data["rates"]:
-        point = {
-            "measurement": "cost",
-            "tags": {"description": rate["description"],"class": rate["priceClass"],"unit": rate["unitOfMeasure"]},
-            "fields": {"value": rate["rate"]},
-            "time": f"{data['date']}T10:00"
-        }
-        data_points.append(point)
+        for h in range(24):
+            point = {
+                "measurement": "cost",
+                "tags": {"description": rate["description"]},
+                "fields": {"value": float(rate["rate"])/2400},
+                "time": f"{data['date'] + timedelta(hours=h)}+10:00"
+            }
+            data_points.append(point)
     return data_points
 
 
@@ -136,7 +151,7 @@ def job():
 
         logger.info(f"Getting offerings data")
         offerings = energy_get_offerings(energy_account, energy_token)
-        offerings["date"] = next_date.strftime("%Y-%m-%d")
+        offerings["date"] = next_date
         data_points = offerings_to_points(offerings)
         write_api.write(org=org, bucket=bucket, record=data_points)
 
