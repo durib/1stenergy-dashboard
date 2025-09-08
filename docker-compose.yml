@@ -42,6 +42,16 @@ services:
       - DEBUG=${DEBUG}
     depends_on:
     - influxdb
+  solar-estimate-loader:
+    build: ./solar_estimate_loader/
+    environment:
+      - ENERGY_START=2024-07-01
+      - INFLUXDB_TOKEN=${INFLUXDB_ADMIN_TOKEN}
+      - INFLUXDB_ORG=${INFLUXDB_ORG}
+      - INFLUXDB_BUCKET=${INFLUXDB_BUCKET}
+      - DEBUG=${DEBUG}
+    depends_on:
+    - influxdb
 volumes:
   influxdb-data:
   grafana-data:
