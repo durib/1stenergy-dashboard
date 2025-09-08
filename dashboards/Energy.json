@@ -98,7 +98,7 @@
           "sort": "none"
         },
         "xTickLabelRotation": 0,
-        "xTickLabelSpacing": 0
+        "xTickLabelSpacing": 100
       },
       "targets": [
         {
@@ -1078,6 +1078,6 @@
   "timezone": "browser",
   "title": "Energy",
   "uid": "adowmj8bgrbpce",
-  "version": 8,
+  "version": 10,
   "weekStart": ""
 }

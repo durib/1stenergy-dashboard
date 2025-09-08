@@ -30,8 +30,8 @@ services:
       - ./provisioning:/etc/grafana/provisioning
     depends_on:
       - influxdb
-  python:
-    build: ./python/
+  energy-loader:
+    build: ./energy_loader/
     environment:
       - ENERGY_START=2024-05-27
       - ENERGY_USER=${ENERGY_USER}
