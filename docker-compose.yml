@@ -24,7 +24,6 @@ services:
       - INFLUXDB_ORG=${INFLUXDB_ORG}
       - INFLUXDB_BUCKET=${INFLUXDB_BUCKET}
       - INFLUXDB_TOKEN=${INFLUXDB_ADMIN_TOKEN}
-
     volumes:
       - grafana-data:/var/lib/grafana
       - ./dashboards:/var/lib/grafana/dashboards
@@ -40,10 +39,9 @@ services:
       - INFLUXDB_TOKEN=${INFLUXDB_ADMIN_TOKEN}
       - INFLUXDB_ORG=${INFLUXDB_ORG}
       - INFLUXDB_BUCKET=${INFLUXDB_BUCKET}
-      - DEBUG=${DEBUGe}
+      - DEBUG=${DEBUG}
     depends_on:
     - influxdb
-
 volumes:
   influxdb-data:
   grafana-data:

@@ -141,6 +141,9 @@ def job():
         next_date = last_time + timedelta(hours=10) + timedelta(minutes=5)
         logger.info(f"Last date found, starting at: {next_date.strftime('%Y-%m-%d')}")
 
+    logger.info(f"Getting offerings data")
+    offerings = energy_get_offerings(energy_account, energy_token)
+
     # get data from 1stenergy
     while next_date.date() < datetime.now().date():
         logger.info(f"Getting energy data for: {next_date.date().strftime('%Y-%m-%d')}")
@@ -149,8 +152,7 @@ def job():
         data_points = energy_to_points(energy_data)
         write_api.write(org=org, bucket=bucket, record=data_points)
 
-        logger.info(f"Getting offerings data")
-        offerings = energy_get_offerings(energy_account, energy_token)
+        logger.info(f"Setting offerings data")
         offerings["date"] = next_date
         data_points = offerings_to_points(offerings)
         write_api.write(org=org, bucket=bucket, record=data_points)
