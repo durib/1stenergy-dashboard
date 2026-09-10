@@ -486,14 +486,14 @@ USAGE_ATTEMPTS = 3
 
 
 # fetch the costed and uncosted passes for one window, or None if it cannot be had
-def energy_get_usage_pair(session, auth, account_id, service_point_id, date):
+def energy_get_usage_pair(session, auth, account_id, service_point_id, date, monthly=True):
     for attempt in range(1, USAGE_ATTEMPTS + 1):
         try:
             return (
                 energy_get_usage(session, auth, account_id, service_point_id, date,
-                                 monthly=True, costed=False),
+                                 monthly=monthly, costed=False),
                 energy_get_usage(session, auth, account_id, service_point_id, date,
-                                 monthly=True, costed=True)
+                                 monthly=monthly, costed=True)
             )
         except requests.HTTPError as error:
             status = error.response.status_code if error.response is not None else None
@@ -511,6 +511,21 @@ def energy_get_usage_pair(session, auth, account_id, service_point_id, date):
             return None
 
 
+# dates whose weekly windows together cover a whole month. Overlap is harmless because
+# a rewrite of the same interval simply replaces it.
+def usage_week_starts(month, window_start, window_end):
+    starts = set()
+    for day in (1, 8, 15, 22, 29):
+        try:
+            date = month.replace(day=day)
+        except ValueError:
+            continue
+        date = max(date, window_start)
+        if date.date() <= window_end:
+            starts.add(date)
+    return sorted(starts)
+
+
 # the first of the month after the one the given date falls in
 def next_month(date):
     return (date.replace(day=28) + timedelta(days=4)).replace(day=1)
@@ -525,7 +540,11 @@ def sync_usage(influx_client, write_api, session, auth, account, service_point):
         f"window {window_start.strftime('%Y-%m-%d')} to {window_end.strftime('%Y-%m-%d')}"
     )
 
-    last_time = influx_get_last(influx_client, "electricity", tags["account"])
+    if str_to_bool(os.getenv("ENERGY_BACKFILL", 'false')):
+        logger.info("ENERGY_BACKFILL set, re-walking the whole window")
+        last_time = None
+    else:
+        last_time = influx_get_last(influx_client, "electricity", tags["account"])
     if last_time is None:
         resume = window_start
         logger.info(f"No last date found, using window start: {resume.strftime('%Y-%m-%d')}")
@@ -549,7 +568,26 @@ def sync_usage(influx_client, write_api, session, auth, account, service_point):
             session, auth, account["accountId"], service_point["servicePointId"], date
         )
         if pair is None:
-            skipped.append(month.strftime("%Y-%m"))
+            # 1stenergy can refuse a month as one window yet serve the same days a week
+            # at a time, so try that before losing the month
+            logger.info(f"Retrying {month.strftime('%Y-%m')} as weekly windows")
+            recovered = 0
+            for week in usage_week_starts(month, window_start, window_end):
+                weekly = energy_get_usage_pair(
+                    session, auth, account["accountId"], service_point["servicePointId"],
+                    week.strftime("%Y-%m-%d"), monthly=False
+                )
+                if weekly is None:
+                    continue
+                if not usage_window(weekly[0]).get("metadata", {}).get("has_data"):
+                    continue
+                weekly_points = usage_to_points(weekly[0], weekly[1], tags)
+                write_api.write(org=org, bucket=bucket, record=weekly_points)
+                recovered += len(weekly_points)
+            if recovered:
+                logger.info(f"Recovered {recovered} points weekly")
+            else:
+                skipped.append(month.strftime("%Y-%m"))
         elif not usage_window(pair[0]).get("metadata", {}).get("has_data"):
             logger.info("No data in this window")
         else:
@@ -588,9 +626,13 @@ logger.info("Usign login details for " + os.getenv("ENERGY_USER"))
 # Run job at startup
 job()
 
-# Schedule the job to run daily at 05:00
-schedule.every().day.at("05:00").do(job)
-while True:
-    schedule.run_pending()
-    logger.info("Sleeping for 1h")
-    time.sleep(3600)
+# a one-off backfill exits when it is done instead of holding the schedule open
+if str_to_bool(os.getenv("ENERGY_BACKFILL", 'false')):
+    logger.info("Backfill run complete, exiting")
+else:
+    # Schedule the job to run daily at 05:00
+    schedule.every().day.at("05:00").do(job)
+    while True:
+        schedule.run_pending()
+        logger.info("Sleeping for 1h")
+        time.sleep(3600)
