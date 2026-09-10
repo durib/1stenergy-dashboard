@@ -41,16 +41,41 @@ def energy_mobile_login(session, bff_token, login):
     return result["access_token"], result["refresh_token"]
 
 
-# the BFF token is only needed to log in, data calls just carry the access token
-def mobile_headers(access_token):
-    return {"Authorization": f"Bearer {access_token}"}
+# hold both tokens together: the Azure bearer lives 3900s and the access token 86400s,
+# so a multi-year backfill outlives the bearer and has to re-mint it mid-run
+BFF_REFRESH_AFTER = 3000
+
+
+def energy_authenticate(session, login):
+    bff_token = energy_get_bff_token(session)
+    logger.info("Got BFF token, logging in to the mobile API")
+    access_token, refresh_token = energy_mobile_login(session, bff_token, login)
+    return {
+        "bff_token": bff_token,
+        "bff_minted": time.time(),
+        "access_token": access_token,
+        "refresh_token": refresh_token
+    }
+
+
+# every data call needs the Azure bearer AND the access token, in separate headers;
+# either one alone is rejected
+def mobile_headers(session, auth):
+    if time.time() - auth["bff_minted"] > BFF_REFRESH_AFTER:
+        logger.info("BFF token is near expiry, minting a replacement")
+        auth["bff_token"] = energy_get_bff_token(session)
+        auth["bff_minted"] = time.time()
+    return {
+        "Authorization": f"Bearer {auth['bff_token']}",
+        "Adaptor-Authorization": auth["access_token"]
+    }
 
 
 # get the 1stenergy accounts from the mobile API
-def energy_get_accounts(session, access_token, fuel_type="ELECTRICITY"):
+def energy_get_accounts(session, auth, fuel_type="ELECTRICITY"):
     response = session.get(
         f"{MOBILE_API}/v1/energy/accounts",
-        headers=mobile_headers(access_token),
+        headers=mobile_headers(session, auth),
         params={"fuel-type": fuel_type}
     )
     response.raise_for_status()
@@ -58,10 +83,10 @@ def energy_get_accounts(session, access_token, fuel_type="ELECTRICITY"):
 
 
 # get one account in full, including its plan and rate history
-def energy_get_account_detail(session, access_token, account_id):
+def energy_get_account_detail(session, auth, account_id):
     response = session.get(
         f"{MOBILE_API}/v1/accounts/{account_id}",
-        headers=mobile_headers(access_token)
+        headers=mobile_headers(session, auth)
     )
     response.raise_for_status()
     return response.json()["data"]
@@ -76,10 +101,10 @@ def energy_select_account(accounts, account_id=None):
 
 
 # get the meter and register detail for one service point
-def energy_get_service_point(session, access_token, service_point_id):
+def energy_get_service_point(session, auth, service_point_id):
     response = session.get(
         f"{MOBILE_API}/v1/electricity/servicepoints/{service_point_id}",
-        headers=mobile_headers(access_token)
+        headers=mobile_headers(session, auth)
     )
     response.raise_for_status()
     return response.json()["data"]
@@ -87,11 +112,11 @@ def energy_get_service_point(session, access_token, service_point_id):
 
 # get one window of interval usage; monthly gives a calendar month, otherwise a Mon-Sun week.
 # costed swaps every value from kWh to dollars, so both passes are needed for a full picture
-def energy_get_usage(session, access_token, account_id, service_point_id, date,
+def energy_get_usage(session, auth, account_id, service_point_id, date,
                      monthly=True, costed=False):
     response = session.get(
         f"{MOBILE_API}/v1/electricity/account/{account_id}/usage/{service_point_id}/{date}",
-        headers=mobile_headers(access_token),
+        headers=mobile_headers(session, auth),
         params={"monthly": str(bool(monthly)).lower(), "costed": str(bool(costed)).lower()}
     )
     response.raise_for_status()
@@ -260,16 +285,52 @@ def resolve_period_date(month_day, plan_start, plan_end):
     return None
 
 
-# a rate point per time-of-use band, effective from the start of the period
-def rate_points(block, effective, tags):
+# a rate point per band, effective from the start of the period. A block holds its rates
+# under timeOfUseRates, singleRate or timeVaryingTariffs depending on the tariff shape,
+# so take whichever is present rather than assuming time of use.
+RATE_BLOCK_KEYS = ("timeOfUseRates", "singleRate", "timeVaryingTariffs")
+
+
+def rate_points(block, effective, tags, default_band=None):
     data_points = []
-    for band in block.get("timeOfUseRates", []):
-        for rate in band["rates"]:
+    bands = []
+    for key in RATE_BLOCK_KEYS:
+        found = block.get(key)
+        if found:
+            bands = found if isinstance(found, list) else [found]
+            break
+    for band in bands:
+        label = band.get("displayName") or block.get("displayName")
+        for rate in band.get("rates") or []:
+            if rate.get("unitPrice") is None:
+                continue
+            # a feed-in tariff is quoted negative; store the magnitude so it reads
+            # alongside the usage rates, with tariffclass telling them apart
+            price = abs(float(rate["unitPrice"]))
+            stamp = f"{effective.strftime('%Y-%m-%d')}T00:00:00+10:00"
+
+            # measureUnit is the only dependable divider here: one plan quotes its
+            # supply charge as a rate block of its own rather than a dailySupplyCharge
+            # attribute, and it is per DAYS where every usage and feed-in rate is per KWH
+            if (rate.get("measureUnit") or "").upper() == "DAYS":
+                data_points.append({
+                    "measurement": "supply",
+                    "tags": clean_tags({**tags, "tariff": label}),
+                    "fields": {"dailycharge": price},
+                    "time": stamp
+                })
+                continue
+
             data_points.append({
                 "measurement": "rate",
-                "tags": {**tags, "tariff": band["displayName"], "timeofuse": band["type"]},
-                "fields": {"unitprice": float(rate["unitPrice"])},
-                "time": f"{effective.strftime('%Y-%m-%d')}T00:00:00+10:00"
+                "tags": clean_tags({
+                    **tags,
+                    "tariff": label,
+                    # a single rate carries no band, so fall back to the caller's label
+                    "timeofuse": band.get("type") or default_band
+                }),
+                "fields": {"unitprice": price},
+                "time": stamp
             })
     return data_points
 
@@ -294,31 +355,44 @@ def plan_to_points(plan, tags, window_start, window_end):
         return max(start, window_start)
 
     # retail service, the tariff periods that also carry the daily supply charge
-    for period in contract.get("tariffPeriod", []):
+    for period in contract.get("tariffPeriod") or []:
         start = resolve_period_date(period["startDate"], plan_start, plan_end)
         end = resolve_period_date(period["endDate"], plan_start, plan_end)
         if start is None: continue
         effective = effective_from(start, end)
         if effective is None: continue
-        period_tags = {**plan_tags, "tariffclass": period["type"]}
+        period_tags = {**plan_tags, "tariffclass": period.get("type")}
         data_points += rate_points(period, effective, period_tags)
-        data_points.append({
-            "measurement": "supply",
-            "tags": {**period_tags, "tariff": period["displayName"]},
-            "fields": {"dailycharge": float(period["dailySupplyCharge"])},
-            "time": f"{effective.strftime('%Y-%m-%d')}T00:00:00+10:00"
-        })
+        # only some periods quote a supply charge, and one plan puts it on a period of
+        # its own with no usage rate at all
+        if period.get("dailySupplyCharge") is not None:
+            data_points.append({
+                "measurement": "supply",
+                "tags": clean_tags({**period_tags, "tariff": period.get("displayName")}),
+                "fields": {"dailycharge": float(period["dailySupplyCharge"])},
+                "time": f"{effective.strftime('%Y-%m-%d')}T00:00:00+10:00"
+            })
 
     # controlled load, whose periods carry full dates rather than MM-DD
-    for load in contract.get("controlledLoad", []):
+    for load in contract.get("controlledLoad") or []:
         start = datetime.strptime(load["startDate"], "%Y-%m-%d")
         end = datetime.strptime(load["endDate"], "%Y-%m-%d") if load.get("endDate") else None
         effective = effective_from(start, end)
         if effective is None: continue
         data_points += rate_points(load, effective, {**plan_tags, "tariffclass": "CONTROLLED_LOAD"})
 
-    # discounts apply across the whole plan
-    for discount in contract.get("discounts", []):
+    # solar feed-in, quoted with full dates like controlled load
+    for feedin in contract.get("solarFeedInTariff") or []:
+        start = datetime.strptime(feedin["startDate"], "%Y-%m-%d")
+        end = datetime.strptime(feedin["endDate"], "%Y-%m-%d") if feedin.get("endDate") else None
+        effective = effective_from(start, end)
+        if effective is None: continue
+        data_points += rate_points(
+            feedin, effective, {**plan_tags, "tariffclass": "SOLAR_FEED_IN"}
+        )
+
+    # discounts apply across the whole plan, and the key can be present but null
+    for discount in contract.get("discounts") or []:
         if discount.get("methodUType") != "percentOfUse": continue
         effective = effective_from(plan_start, plan_end)
         if effective is None: continue
@@ -360,36 +434,30 @@ def job():
     write_api = influx_client.write_api(write_options=SYNCHRONOUS)
     logger.info("Connecting to InfluxDB v2 on " + influx_client.url)
 
-    # mobile API auth: the BFF token is short lived but only the login needs it, the
-    # access token it returns lasts 24 hours and carries the rest of the run
     mobile_session = energy_mobile_session()
-    bff_token = energy_get_bff_token(mobile_session)
-    logger.info("Got BFF token, logging in to the mobile API")
-    access_token, refresh_token = energy_mobile_login(mobile_session, bff_token, energy_login)
+    auth = energy_authenticate(mobile_session, energy_login)
     logger.info("Mobile API login succeeded")
 
-    accounts = energy_get_accounts(mobile_session, access_token)
+    accounts = energy_get_accounts(mobile_session, auth)
     if os.getenv("ENERGY_ACCOUNT"):
         accounts = [energy_select_account(accounts, os.getenv("ENERGY_ACCOUNT"))]
     logger.info(f"Found {len(accounts)} account(s) to load")
 
     # load every account, tagged so each can be filtered on its own
     for account in accounts:
-        detail = energy_get_account_detail(mobile_session, access_token, account["accountId"])
+        detail = energy_get_account_detail(mobile_session, auth, account["accountId"])
         for service_point in detail["servicePoints"]:
-            sync_meters(write_api, mobile_session, access_token, detail, service_point)
+            sync_meters(write_api, mobile_session, auth, detail, service_point)
             sync_plans(write_api, detail, service_point)
-            sync_usage(
-                influx_client, write_api, mobile_session, access_token, detail, service_point
-            )
+            sync_usage(influx_client, write_api, mobile_session, auth, detail, service_point)
 
     logger.info("Sync task complete.")
 
 
 # write the service point metadata and its meter registers
-def sync_meters(write_api, session, access_token, account, service_point):
+def sync_meters(write_api, session, auth, account, service_point):
     tags = account_tags(account, service_point)
-    detail = energy_get_service_point(session, access_token, service_point["servicePointId"])
+    detail = energy_get_service_point(session, auth, service_point["servicePointId"])
     data_points = service_point_to_points(detail, tags)
     logger.info(
         f"NMI {detail['nationalMeteringId']}, "
@@ -412,13 +480,44 @@ def sync_plans(write_api, account, service_point):
         write_api.write(org=org, bucket=bucket, record=data_points)
 
 
+# 1stenergy serves a hard 500 for the occasional month (2024-06 on service point 530720),
+# and a transient 5xx is always possible, so retry briefly and then move on without it
+USAGE_ATTEMPTS = 3
+
+
+# fetch the costed and uncosted passes for one window, or None if it cannot be had
+def energy_get_usage_pair(session, auth, account_id, service_point_id, date):
+    for attempt in range(1, USAGE_ATTEMPTS + 1):
+        try:
+            return (
+                energy_get_usage(session, auth, account_id, service_point_id, date,
+                                 monthly=True, costed=False),
+                energy_get_usage(session, auth, account_id, service_point_id, date,
+                                 monthly=True, costed=True)
+            )
+        except requests.HTTPError as error:
+            status = error.response.status_code if error.response is not None else None
+            # a window outside the service point's life is a definite no, not a fault
+            if status == 403:
+                logger.warning(f"Usage forbidden for {date}, outside this service point")
+                return None
+            if status is None or status < 500:
+                raise
+            if attempt < USAGE_ATTEMPTS:
+                logger.warning(f"Server error {status} for {date}, retrying ({attempt})")
+                time.sleep(5 * attempt)
+                continue
+            logger.error(f"Server error {status} for {date} after {attempt} tries, skipping")
+            return None
+
+
 # the first of the month after the one the given date falls in
 def next_month(date):
     return (date.replace(day=28) + timedelta(days=4)).replace(day=1)
 
 
 # load one service point's interval usage, picking up where its own tags left off
-def sync_usage(influx_client, write_api, session, access_token, account, service_point):
+def sync_usage(influx_client, write_api, session, auth, account, service_point):
     tags = account_tags(account, service_point)
     window_start, window_end = energy_account_window(service_point)
     logger.info(
@@ -431,30 +530,36 @@ def sync_usage(influx_client, write_api, session, access_token, account, service
         resume = window_start
         logger.info(f"No last date found, using window start: {resume.strftime('%Y-%m-%d')}")
     else:
-        resume = last_time + timedelta(hours=10)
+        # InfluxDB hands back an aware UTC time; shift it to AEST wall clock and drop
+        # the zone so it compares with the naive window dates
+        resume = (last_time + timedelta(hours=10)).replace(tzinfo=None)
         logger.info(f"Last date found, starting at: {resume.strftime('%Y-%m-%d')}")
 
     # a monthly window returns a whole calendar month of half-hourly intervals in one
     # call, so refetch from the first of the resume month and let the writes overwrite
+    skipped = []
     month = max(resume, window_start).replace(day=1)
     while month.date() <= window_end:
-        date = month.strftime("%Y-%m-%d")
+        # a date earlier than the service point's own start is rejected outright, so
+        # never ask before the window start even when rewinding to the first of a month.
+        # The reply still covers the whole calendar month the date falls in.
+        date = max(month, window_start).strftime("%Y-%m-%d")
         logger.info(f"Getting usage for: {month.strftime('%Y-%m')}")
-        uncosted = energy_get_usage(
-            session, access_token, account["accountId"], service_point["servicePointId"],
-            date, monthly=True, costed=False
+        pair = energy_get_usage_pair(
+            session, auth, account["accountId"], service_point["servicePointId"], date
         )
-        costed = energy_get_usage(
-            session, access_token, account["accountId"], service_point["servicePointId"],
-            date, monthly=True, costed=True
-        )
-        if not usage_window(uncosted).get("metadata", {}).get("has_data"):
+        if pair is None:
+            skipped.append(month.strftime("%Y-%m"))
+        elif not usage_window(pair[0]).get("metadata", {}).get("has_data"):
             logger.info("No data in this window")
         else:
-            data_points = usage_to_points(uncosted, costed, tags)
+            data_points = usage_to_points(pair[0], pair[1], tags)
             logger.info(f"Writing {len(data_points)} usage points")
             write_api.write(org=org, bucket=bucket, record=data_points)
         month = next_month(month)
+
+    if skipped:
+        logger.warning(f"Months the API would not serve: {', '.join(skipped)}")
 
 
 # Configure logging
