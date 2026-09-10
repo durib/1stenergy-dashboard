@@ -1,3 +1,4 @@
 /.env
 /influxdb-config
-result.csv
+*.csv
+*.pyc

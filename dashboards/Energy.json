@@ -24,7 +24,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "P951FEA4DE68E13C5"
+        "uid": "influxdb"
       },
       "description": "",
       "fieldConfig": {
@@ -102,56 +102,39 @@
       },
       "targets": [
         {
-          "alias": "$tag_tariff",
           "datasource": {
             "type": "influxdb",
-            "uid": "adowjq2r1r20wc"
+            "uid": "influxdb"
           },
-          "groupBy": [
-            {
-              "params": [
-                "1h"
-              ],
-              "type": "time"
-            },
-            {
-              "params": [
-                "tariff::tag"
-              ],
-              "type": "tag"
-            }
-          ],
-          "measurement": "electricity",
           "orderByTime": "ASC",
           "policy": "default",
-          "query": "SELECT \"value\" FROM \"electricity\" WHERE $timeFilter GROUP BY time(1h), \"tariff\"::tag",
-          "rawQuery": false,
+          "query": "SELECT sum(\"consumption\") FROM \"electricity\" WHERE $timeFilter AND \"site\" =~ /^$site$/ GROUP BY time(1h), \"timeofuse\"::tag",
+          "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series",
-          "select": [
-            [
-              {
-                "params": [
-                  "value"
-                ],
-                "type": "field"
-              },
-              {
-                "params": [],
-                "type": "sum"
-              }
-            ]
-          ],
-          "tags": []
+          "alias": "$tag_timeofuse"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb"
+          },
+          "orderByTime": "ASC",
+          "policy": "default",
+          "query": "SELECT sum(\"export\") FROM \"electricity\" WHERE $timeFilter AND \"site\" =~ /^$site$/ GROUP BY time(1h)",
+          "rawQuery": true,
+          "refId": "B",
+          "resultFormat": "time_series",
+          "alias": "Solar export"
         }
       ],
-      "title": "Energy Consumption by Hour",
+      "title": "Energy by Hour",
       "type": "barchart"
     },
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "P951FEA4DE68E13C5"
+        "uid": "influxdb"
       },
       "description": "",
       "fieldConfig": {
@@ -195,7 +178,7 @@
               }
             ]
           },
-          "unit": "currencyUSD"
+          "unit": "currencyAUD"
         },
         "overrides": []
       },
@@ -229,173 +212,39 @@
       },
       "targets": [
         {
-          "alias": "$tag_tariff",
           "datasource": {
             "type": "influxdb",
-            "uid": "adowjq2r1r20wc"
+            "uid": "influxdb"
           },
-          "groupBy": [
-            {
-              "params": [
-                "1h"
-              ],
-              "type": "time"
-            },
-            {
-              "params": [
-                "tariff::tag"
-              ],
-              "type": "tag"
-            }
-          ],
-          "hide": false,
-          "measurement": "electricity",
           "orderByTime": "ASC",
           "policy": "default",
-          "query": "SELECT \"value\" FROM \"electricity\" WHERE $timeFilter GROUP BY time(1h), \"tariff\"::tag",
-          "rawQuery": false,
-          "refId": "E",
-          "resultFormat": "time_series",
-          "select": [
-            [
-              {
-                "params": [
-                  "value"
-                ],
-                "type": "field"
-              },
-              {
-                "params": [],
-                "type": "sum"
-              },
-              {
-                "params": [
-                  "*19.36/100"
-                ],
-                "type": "math"
-              }
-            ]
-          ],
-          "tags": [
-            {
-              "key": "tariff::tag",
-              "operator": "=",
-              "value": "Controlled Load"
-            }
-          ]
-        },
-        {
-          "alias": "$tag_tariff",
-          "datasource": {
-            "type": "influxdb",
-            "uid": "adowjq2r1r20wc"
-          },
-          "groupBy": [
-            {
-              "params": [
-                "1h"
-              ],
-              "type": "time"
-            },
-            {
-              "params": [
-                "tariff::tag"
-              ],
-              "type": "tag"
-            }
-          ],
-          "hide": false,
-          "measurement": "electricity",
-          "orderByTime": "ASC",
-          "policy": "default",
-          "query": "SELECT \"value\" FROM \"electricity\" WHERE $timeFilter GROUP BY time(1h), \"tariff\"::tag",
-          "rawQuery": false,
+          "query": "SELECT sum(\"cost\") FROM \"electricity\" WHERE $timeFilter AND \"site\" =~ /^$site$/ GROUP BY time(1h), \"timeofuse\"::tag",
+          "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series",
-          "select": [
-            [
-              {
-                "params": [
-                  "value"
-                ],
-                "type": "field"
-              },
-              {
-                "params": [],
-                "type": "sum"
-              },
-              {
-                "params": [
-                  "*19.36/100"
-                ],
-                "type": "math"
-              }
-            ]
-          ],
-          "tags": [
-            {
-              "key": "tariff::tag",
-              "operator": "=",
-              "value": "Peak"
-            }
-          ]
+          "alias": "$tag_timeofuse"
         },
         {
-          "alias": "Daily charge",
           "datasource": {
             "type": "influxdb",
-            "uid": "P951FEA4DE68E13C5"
+            "uid": "influxdb"
           },
-          "groupBy": [
-            {
-              "params": [
-                "1h"
-              ],
-              "type": "time"
-            },
-            {
-              "params": [
-                "null"
-              ],
-              "type": "fill"
-            }
-          ],
-          "hide": false,
-          "measurement": "cost",
           "orderByTime": "ASC",
           "policy": "default",
-          "refId": "C",
+          "query": "SELECT sum(\"credit\") FROM \"electricity\" WHERE $timeFilter AND \"site\" =~ /^$site$/ GROUP BY time(1h)",
+          "rawQuery": true,
+          "refId": "B",
           "resultFormat": "time_series",
-          "select": [
-            [
-              {
-                "params": [
-                  "value"
-                ],
-                "type": "field"
-              },
-              {
-                "params": [],
-                "type": "mean"
-              }
-            ]
-          ],
-          "tags": [
-            {
-              "key": "description::tag",
-              "operator": "=",
-              "value": "Daily Supply Charge"
-            }
-          ]
+          "alias": "Feed-in credit"
         }
       ],
-      "title": "Energy Cost by Hour",
+      "title": "Cost by Hour",
       "type": "barchart"
     },
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "P951FEA4DE68E13C5"
+        "uid": "influxdb"
       },
       "fieldConfig": {
         "defaults": {
@@ -448,42 +297,14 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "adowjq2r1r20wc"
+            "uid": "influxdb"
           },
-          "groupBy": [
-            {
-              "params": [
-                "$interval"
-              ],
-              "type": "time"
-            }
-          ],
-          "measurement": "electricity",
           "orderByTime": "ASC",
           "policy": "default",
-          "query": "SELECT sum(\"value\") FROM \"electricity\" WHERE $timeFilter GROUP BY time(1h), \"tariff\"::tag",
-          "rawQuery": false,
+          "query": "SELECT sum(\"consumption\") FROM \"electricity\" WHERE $timeFilter AND \"site\" =~ /^$site$/",
+          "rawQuery": true,
           "refId": "A",
-          "resultFormat": "time_series",
-          "select": [
-            [
-              {
-                "params": [
-                  "value"
-                ],
-                "type": "field"
-              },
-              {
-                "params": [],
-                "type": "sum"
-              },
-              {
-                "params": [],
-                "type": "cumulative_sum"
-              }
-            ]
-          ],
-          "tags": []
+          "resultFormat": "time_series"
         }
       ],
       "title": "Total",
@@ -492,7 +313,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "P951FEA4DE68E13C5"
+        "uid": "influxdb"
       },
       "fieldConfig": {
         "defaults": {
@@ -543,60 +364,26 @@
       "pluginVersion": "10.4.2",
       "targets": [
         {
-          "alias": "$tag_tariff",
           "datasource": {
             "type": "influxdb",
-            "uid": "adowjq2r1r20wc"
+            "uid": "influxdb"
           },
-          "groupBy": [
-            {
-              "params": [
-                "$interval"
-              ],
-              "type": "time"
-            },
-            {
-              "params": [
-                "tariff::tag"
-              ],
-              "type": "tag"
-            }
-          ],
-          "measurement": "electricity",
           "orderByTime": "ASC",
           "policy": "default",
-          "query": "SELECT sum(\"value\") FROM \"electricity\" WHERE $timeFilter GROUP BY time(1h), \"tariff\"::tag",
-          "rawQuery": false,
+          "query": "SELECT sum(\"consumption\") FROM \"electricity\" WHERE $timeFilter AND \"site\" =~ /^$site$/ GROUP BY \"timeofuse\"::tag",
+          "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series",
-          "select": [
-            [
-              {
-                "params": [
-                  "value"
-                ],
-                "type": "field"
-              },
-              {
-                "params": [],
-                "type": "sum"
-              },
-              {
-                "params": [],
-                "type": "cumulative_sum"
-              }
-            ]
-          ],
-          "tags": []
+          "alias": "$tag_timeofuse"
         }
       ],
-      "title": "By Tariff",
+      "title": "By Time of Use",
       "type": "stat"
     },
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "P951FEA4DE68E13C5"
+        "uid": "influxdb"
       },
       "description": "",
       "fieldConfig": {
@@ -618,7 +405,7 @@
               }
             ]
           },
-          "unit": "currencyUSD"
+          "unit": "currencyAUD"
         },
         "overrides": []
       },
@@ -648,187 +435,52 @@
       "pluginVersion": "10.4.2",
       "targets": [
         {
-          "alias": "Daily charge",
           "datasource": {
             "type": "influxdb",
-            "uid": "P951FEA4DE68E13C5"
+            "uid": "influxdb"
           },
-          "groupBy": [
-            {
-              "params": [
-                "1h"
-              ],
-              "type": "time"
-            },
-            {
-              "params": [
-                "null"
-              ],
-              "type": "fill"
-            }
-          ],
-          "hide": false,
-          "measurement": "cost",
           "orderByTime": "ASC",
           "policy": "default",
-          "query": "SELECT sum(\"value\")*0+134.97/100 as \"Daily charge\" FROM \"electricity\" WHERE $timeFilter GROUP BY time(1h)",
-          "rawQuery": false,
-          "refId": "D",
-          "resultFormat": "time_series",
-          "select": [
-            [
-              {
-                "params": [
-                  "value"
-                ],
-                "type": "field"
-              },
-              {
-                "params": [],
-                "type": "sum"
-              },
-              {
-                "params": [],
-                "type": "cumulative_sum"
-              }
-            ]
-          ],
-          "tags": [
-            {
-              "key": "description::tag",
-              "operator": "=",
-              "value": "Daily Supply Charge"
-            }
-          ]
-        },
-        {
-          "alias": "$tag_tariff",
-          "datasource": {
-            "type": "influxdb",
-            "uid": "adowjq2r1r20wc"
-          },
-          "groupBy": [
-            {
-              "params": [
-                "1h"
-              ],
-              "type": "time"
-            },
-            {
-              "params": [
-                "tariff::tag"
-              ],
-              "type": "tag"
-            }
-          ],
-          "hide": false,
-          "measurement": "electricity",
-          "orderByTime": "ASC",
-          "policy": "default",
-          "query": "SELECT \"value\" FROM \"electricity\" WHERE $timeFilter GROUP BY time(1h), \"tariff\"::tag",
-          "rawQuery": false,
-          "refId": "E",
-          "resultFormat": "time_series",
-          "select": [
-            [
-              {
-                "params": [
-                  "value"
-                ],
-                "type": "field"
-              },
-              {
-                "params": [],
-                "type": "sum"
-              },
-              {
-                "params": [],
-                "type": "cumulative_sum"
-              },
-              {
-                "params": [
-                  "*19.36/100"
-                ],
-                "type": "math"
-              }
-            ]
-          ],
-          "tags": [
-            {
-              "key": "tariff::tag",
-              "operator": "=",
-              "value": "Controlled Load"
-            }
-          ]
-        },
-        {
-          "alias": "$tag_tariff",
-          "datasource": {
-            "type": "influxdb",
-            "uid": "adowjq2r1r20wc"
-          },
-          "groupBy": [
-            {
-              "params": [
-                "1h"
-              ],
-              "type": "time"
-            },
-            {
-              "params": [
-                "tariff::tag"
-              ],
-              "type": "tag"
-            }
-          ],
-          "hide": false,
-          "measurement": "electricity",
-          "orderByTime": "ASC",
-          "policy": "default",
-          "query": "SELECT \"value\" FROM \"electricity\" WHERE $timeFilter GROUP BY time(1h), \"tariff\"::tag",
-          "rawQuery": false,
+          "query": "SELECT sum(\"cost\") FROM \"electricity\" WHERE $timeFilter AND \"site\" =~ /^$site$/",
+          "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series",
-          "select": [
-            [
-              {
-                "params": [
-                  "value"
-                ],
-                "type": "field"
-              },
-              {
-                "params": [],
-                "type": "sum"
-              },
-              {
-                "params": [],
-                "type": "cumulative_sum"
-              },
-              {
-                "params": [
-                  "*29.92/100"
-                ],
-                "type": "math"
-              }
-            ]
-          ],
-          "tags": [
-            {
-              "key": "tariff::tag",
-              "operator": "=",
-              "value": "Peak"
-            }
-          ]
+          "alias": "Usage"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb"
+          },
+          "orderByTime": "ASC",
+          "policy": "default",
+          "query": "SELECT sum(\"credit\") FROM \"electricity\" WHERE $timeFilter AND \"site\" =~ /^$site$/",
+          "rawQuery": true,
+          "refId": "B",
+          "resultFormat": "time_series",
+          "alias": "Feed-in"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb"
+          },
+          "orderByTime": "ASC",
+          "policy": "default",
+          "query": "SELECT sum(\"cost\") - sum(\"credit\") FROM \"daily\" WHERE $timeFilter AND \"site\" =~ /^$site$/",
+          "rawQuery": true,
+          "refId": "C",
+          "resultFormat": "time_series",
+          "alias": "Net"
         }
       ],
-      "title": "Energy Cost by Hour (Anytime)",
+      "title": "Cost",
       "type": "stat"
     },
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "P951FEA4DE68E13C5"
+        "uid": "influxdb"
       },
       "description": "",
       "fieldConfig": {
@@ -850,7 +502,7 @@
               }
             ]
           },
-          "unit": "currencyUSD"
+          "unit": "currencyAUD"
         },
         "overrides": []
       },
@@ -880,187 +532,33 @@
       "pluginVersion": "10.4.2",
       "targets": [
         {
-          "alias": "Daily charge",
           "datasource": {
             "type": "influxdb",
-            "uid": "P951FEA4DE68E13C5"
+            "uid": "influxdb"
           },
-          "groupBy": [
-            {
-              "params": [
-                "1h"
-              ],
-              "type": "time"
-            },
-            {
-              "params": [
-                "null"
-              ],
-              "type": "fill"
-            }
-          ],
-          "hide": false,
-          "measurement": "cost",
           "orderByTime": "ASC",
           "policy": "default",
-          "query": "SELECT sum(\"value\")*0+134.97/100 as \"Daily charge\" FROM \"electricity\" WHERE $timeFilter GROUP BY time(1h)",
-          "rawQuery": false,
-          "refId": "D",
-          "resultFormat": "time_series",
-          "select": [
-            [
-              {
-                "params": [
-                  "value"
-                ],
-                "type": "field"
-              },
-              {
-                "params": [],
-                "type": "sum"
-              },
-              {
-                "params": [],
-                "type": "cumulative_sum"
-              },
-              {
-                "params": [
-                  "*0.9354"
-                ],
-                "type": "math"
-              }
-            ]
-          ],
-          "tags": [
-            {
-              "key": "description::tag",
-              "operator": "=",
-              "value": "Daily Supply Charge"
-            }
-          ]
-        },
-        {
-          "alias": "$tag_timeofuse",
-          "datasource": {
-            "type": "influxdb",
-            "uid": "adowjq2r1r20wc"
-          },
-          "groupBy": [
-            {
-              "params": [
-                "1h"
-              ],
-              "type": "time"
-            },
-            {
-              "params": [
-                "timeofuse::tag"
-              ],
-              "type": "tag"
-            }
-          ],
-          "hide": false,
-          "measurement": "electricity",
-          "orderByTime": "ASC",
-          "policy": "default",
-          "query": "SELECT \"value\" FROM \"electricity\" WHERE $timeFilter GROUP BY time(1h), \"tariff\"::tag",
-          "rawQuery": false,
-          "refId": "E",
-          "resultFormat": "time_series",
-          "select": [
-            [
-              {
-                "params": [
-                  "value"
-                ],
-                "type": "field"
-              },
-              {
-                "params": [],
-                "type": "sum"
-              },
-              {
-                "params": [],
-                "type": "cumulative_sum"
-              },
-              {
-                "params": [
-                  "*16.83/100"
-                ],
-                "type": "math"
-              }
-            ]
-          ],
-          "tags": [
-            {
-              "key": "timeofuse::tag",
-              "operator": "=",
-              "value": "Off-peak"
-            }
-          ]
-        },
-        {
-          "alias": "$tag_timeofuse",
-          "datasource": {
-            "type": "influxdb",
-            "uid": "adowjq2r1r20wc"
-          },
-          "groupBy": [
-            {
-              "params": [
-                "1h"
-              ],
-              "type": "time"
-            },
-            {
-              "params": [
-                "timeofuse::tag"
-              ],
-              "type": "tag"
-            }
-          ],
-          "hide": false,
-          "measurement": "electricity",
-          "orderByTime": "ASC",
-          "policy": "default",
-          "query": "SELECT cumulative_sum(sum(\"value\")) *19.36/100 FROM \"electricity\" WHERE $timeFilter GROUP BY time(1h)",
-          "rawQuery": false,
+          "query": "SELECT last(\"unitprice\") FROM \"rate\" WHERE time <= now() AND \"site\" =~ /^$site$/ GROUP BY \"timeofuse\"::tag",
+          "rawQuery": true,
           "refId": "A",
           "resultFormat": "time_series",
-          "select": [
-            [
-              {
-                "params": [
-                  "value"
-                ],
-                "type": "field"
-              },
-              {
-                "params": [],
-                "type": "sum"
-              },
-              {
-                "params": [],
-                "type": "cumulative_sum"
-              },
-              {
-                "params": [
-                  "*36.19/100"
-                ],
-                "type": "math"
-              }
-            ]
-          ],
-          "tags": [
-            {
-              "key": "timeofuse::tag",
-              "operator": "=",
-              "value": "Peak"
-            }
-          ]
+          "alias": "$tag_timeofuse"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb"
+          },
+          "orderByTime": "ASC",
+          "policy": "default",
+          "query": "SELECT last(\"dailycharge\") FROM \"supply\" WHERE time <= now() AND \"site\" =~ /^$site$/",
+          "rawQuery": true,
+          "refId": "B",
+          "resultFormat": "time_series",
+          "alias": "Supply /day"
         }
       ],
-      "title": "Energy Cost by Hour (TOU)",
+      "title": "Current Rates",
       "type": "stat"
     }
   ],
@@ -1068,14 +566,35 @@
   "schemaVersion": 39,
   "tags": [],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "current": {},
+        "datasource": {
+          "type": "influxdb",
+          "uid": "influxdb"
+        },
+        "definition": "SHOW TAG VALUES FROM \"electricity\" WITH KEY = \"site\"",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Site",
+        "multi": true,
+        "name": "site",
+        "options": [],
+        "query": "SHOW TAG VALUES FROM \"electricity\" WITH KEY = \"site\"",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
   },
   "time": {
     "from": "now-1d/d",
     "to": "now-1d/d"
   },
   "timepicker": {},
-  "timezone": "browser",
+  "timezone": "Australia/Brisbane",
   "title": "Energy",
   "uid": "adowmj8bgrbpce",
   "version": 10,

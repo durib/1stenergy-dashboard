@@ -36,6 +36,7 @@ services:
     build: ./energy_loader/
     environment:
       - ENERGY_START=2024-05-27
+      - ENERGY_ACCOUNT=${ENERGY_ACCOUNT:-}
       - ENERGY_USER=${ENERGY_USER}
       - ENERGY_PASSWORD=${ENERGY_PASSWORD}
       - INFLUXDB_TOKEN=${INFLUXDB_ADMIN_TOKEN}

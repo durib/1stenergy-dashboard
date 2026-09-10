@@ -11,108 +11,338 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 def str_to_bool(value):
     return value.lower() in ('true', '1', 't', 'y', 'yes')
 
-# Determine if the given date and time is during peak or off-peak hours.
-def get_peak_status(date_time):
-    # Convert input to datetime object if it's not already
-    if isinstance(date_time, str):
-        date_time = datetime.strptime(date_time, '%Y-%m-%d %H:%M:%S')
-    
-    day_of_week = date_time.weekday()
-    hour = date_time.hour
-    
-    if day_of_week >= 5: return "Off-peak"
-    if (7 <= hour < 10) or (16 <= hour < 21): return "Peak"
-    return "Off-peak"
+# 1stenergy mobile-app API, behind Azure Front Door
+MOBILE_API = "https://endpoint-firstenergy-mobileapp-prod-dchufubea3frdfhc.a01.azurefd.net"
 
-# get 1stenergy token using login
-def energy_get_token(login):
+
+# session for the mobile API, so the load balancer cookies are kept across calls
+def energy_mobile_session():
+    session = requests.Session()
+    session.headers.update({"Accept": "application/json"})
+    return session
+
+
+# get the short-lived Azure bearer that the mobile API login call requires
+def energy_get_bff_token(session):
+    response = session.post("https://myaccount.1stenergy.com.au/api/GetBffToken")
+    response.raise_for_status()
+    return response.text.strip()
+
+
+# log in to the mobile API, returns the access and refresh tokens
+def energy_mobile_login(session, bff_token, login):
     headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Origin": "https://portal.1stenergy.com.au/",
-        "Referer": "https://portal.1stenergy.com.au/"
+        "Authorization": f"Bearer {bff_token}",
+        "Content-Type": "application/json"
     }
-    response = requests.post(
-        "https://portal-api.1stenergy.com.au/api/users/validate-user",
-        json=login,
-        headers=headers
+    response = session.post(f"{MOBILE_API}/v1/auth/login", json=login, headers=headers)
+    response.raise_for_status()
+    result = response.json()
+    return result["access_token"], result["refresh_token"]
+
+
+# the BFF token is only needed to log in, data calls just carry the access token
+def mobile_headers(access_token):
+    return {"Authorization": f"Bearer {access_token}"}
+
+
+# get the 1stenergy accounts from the mobile API
+def energy_get_accounts(session, access_token, fuel_type="ELECTRICITY"):
+    response = session.get(
+        f"{MOBILE_API}/v1/energy/accounts",
+        headers=mobile_headers(access_token),
+        params={"fuel-type": fuel_type}
     )
     response.raise_for_status()
-    return response.json()["result"]["token"]
+    return response.json()["data"]["accounts"]
 
 
-# get the first 1stenergy utilityAccountId
-def energy_get_account(token):
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Brand-Code": "FIRST"
-    }
-    response = requests.get(
-        "https://portal-api.1stenergy.com.au/api/users/accounts",
-        headers=headers
+# get one account in full, including its plan and rate history
+def energy_get_account_detail(session, access_token, account_id):
+    response = session.get(
+        f"{MOBILE_API}/v1/accounts/{account_id}",
+        headers=mobile_headers(access_token)
     )
     response.raise_for_status()
-    return response.json()[0]["properties"][0]["utilityServices"][0]["utilityAccountId"]
+    return response.json()["data"]
 
 
-# get 1stenergy usage data
-def energy_get_data(account, token, date):
-    headers = {"Authorization": f"Bearer {token}"}
-    params = {
-        "year": date.year,
-        "month": date.month,
-        "day": date.day,
-        "productType": "POWER",
-        "viewInterval": "day",
-        "viewMode": "USAGE"
-    }
-    url = f"https://portal-api.1stenergy.com.au/api/utility/{account}/usage-chart?"
-    response = requests.get(url, headers=headers, params=params)
+# pick the account to load, preferring the open one, newest first
+def energy_select_account(accounts, account_id=None):
+    if account_id:
+        return next(a for a in accounts if a["accountId"] == account_id)
+    open_accounts = [a for a in accounts if a["openStatus"] == "OPEN"]
+    return max(open_accounts or accounts, key=lambda a: a["creationDate"])
+
+
+# get the meter and register detail for one service point
+def energy_get_service_point(session, access_token, service_point_id):
+    response = session.get(
+        f"{MOBILE_API}/v1/electricity/servicepoints/{service_point_id}",
+        headers=mobile_headers(access_token)
+    )
+    response.raise_for_status()
+    return response.json()["data"]
+
+
+# get one window of interval usage; monthly gives a calendar month, otherwise a Mon-Sun week.
+# costed swaps every value from kWh to dollars, so both passes are needed for a full picture
+def energy_get_usage(session, access_token, account_id, service_point_id, date,
+                     monthly=True, costed=False):
+    response = session.get(
+        f"{MOBILE_API}/v1/electricity/account/{account_id}/usage/{service_point_id}/{date}",
+        headers=mobile_headers(access_token),
+        params={"monthly": str(bool(monthly)).lower(), "costed": str(bool(costed)).lower()}
+    )
     response.raise_for_status()
     return response.json()
 
-# get 1stenergy usage data
-def energy_get_offerings(account, token):
-    headers = {"Authorization": f"Bearer {token}"}
-    url = f"https://portal-api.1stenergy.com.au/api/product-offerings/{account}?"
-    response = requests.get(url, headers=headers)
-    response.raise_for_status()
-    return response.json()
 
-# Convert JSON data to InfluxDB energy points
-def energy_to_points(data):
+# the window is nested under current_month or current_week depending on the monthly flag
+def usage_window(payload):
+    return payload.get("current_month") or payload.get("current_week") or {}
+
+
+# interval markers are AEST all year, since NEM interval data does not observe daylight saving
+def interval_time(marker):
+    day = marker["yyyymmdd"]
+    return f"{day[:4]}-{day[4:6]}-{day[6:]}T{marker.get('time', '00:00')}:00+10:00"
+
+
+# the one non-solar key in categorised_total names the band the interval billed at
+def interval_band(data):
+    for name, entry in (data.get("categorised_total") or {}).items():
+        if not entry.get("solar"):
+            return name
+    return None
+
+
+# InfluxDB discards empty tag values, so leave them out rather than writing blanks
+def clean_tags(tags):
+    return {key: value for key, value in tags.items() if value}
+
+
+# tags identifying which account and site a reading belongs to, so it can be filtered
+def account_tags(account, service_point):
+    return clean_tags({
+        "account": account["accountNumber"],
+        "servicepoint": service_point["servicePointId"],
+        "site": service_point["siteAddress"]["addressLine1"]
+    })
+
+
+# the days to load for a service point, clamped to ENERGY_START and its own dates
+def energy_account_window(service_point):
+    window_start = max(datetime.strptime(service_point["startDate"], "%Y-%m-%d"), start_date)
+    last_full_day = datetime.now().date() - timedelta(days=1)
+    if service_point.get("endDate"):
+        window_end = min(datetime.strptime(service_point["endDate"], "%Y-%m-%d").date(), last_full_day)
+    else:
+        window_end = last_full_day
+    return window_start, window_end
+
+
+# Convert a matched pair of usage windows to InfluxDB points. The uncosted pass carries
+# kWh and the costed pass dollars, for the same intervals, so they are merged by slot.
+def usage_to_points(uncosted, costed, tags):
     data_points = []
-    for series in data["series"]:
-        for reading in series["data"]:
-            reading_time = datetime.strptime(f"{data['date']}T{reading['category']}:00+10:00", '%Y-%m-%dT%H:%M:%S%z')
-            point = {
+    costed_days = usage_window(costed).get("intervals") or {}
+
+    for index, day in (usage_window(uncosted).get("intervals") or {}).items():
+        costed_day = costed_days.get(index) or {}
+        costed_slots = costed_day.get("intervals") or {}
+
+        for slot, interval in (day.get("intervals") or {}).items():
+            usage = interval.get("data") or {}
+            spend = ((costed_slots.get(slot) or {}).get("data")) or {}
+            data_points.append({
                 "measurement": "electricity",
-                "tags": {"tariff": series["name"], "timeofuse": get_peak_status(reading_time)},
-                "fields": {"value": reading["value"]},
-                "time": reading_time
-            }
-            data_points.append(point)
+                "tags": clean_tags({**tags, "timeofuse": interval_band(usage)}),
+                "fields": {
+                    "consumption": float(usage.get("consumption") or 0),
+                    "export": float(usage.get("export") or 0),
+                    "cost": float(spend.get("consumption") or 0),
+                    # export reads as a credit once costed, so store it as a positive amount
+                    "credit": abs(float(spend.get("export") or 0))
+                },
+                "time": interval_time(interval["interval_range"]["starts_at"])
+            })
+
+        # days beyond the meter reads come back with null totals and no intervals
+        totals = day.get("data") or {}
+        if totals.get("total_spend") is None:
+            continue
+        costed_totals = costed_day.get("data") or {}
+        data_points.append({
+            "measurement": "daily",
+            "tags": tags,
+            "fields": {
+                # solar_input and grid_spend are kWh uncosted and dollars costed
+                "consumption": float(totals.get("grid_spend") or 0),
+                "export": float(totals.get("solar_input") or 0),
+                "cost": float(costed_totals.get("grid_spend") or 0),
+                "credit": abs(float(costed_totals.get("solar_input") or 0)),
+                "servicecharge": float(costed_totals.get("service_charge") or 0),
+                "temperature": float(totals.get("temperature") or 0),
+                "quality": (day.get("metadata") or {}).get("quality_flag") or ""
+            },
+            "time": interval_time(day["interval_range"]["starts_at"])
+        })
+
     return data_points
 
-# Convert JSON data to InfluxDB offerings points
-def offerings_to_points(data):
+
+# Convert service point metadata and its meter registers to InfluxDB points
+def service_point_to_points(detail, tags):
     data_points = []
-    for rate in data["rates"]:
-        for h in range(24):
-            point = {
-                "measurement": "cost",
-                "tags": {"description": rate["description"]},
-                "fields": {"value": float(rate["rate"])/2400},
-                "time": f"{data['date'] + timedelta(hours=h)}+10:00"
-            }
-            data_points.append(point)
+    valid_from = detail["validFromDate"]
+    participants = {p["role"]: p["party"] for p in detail.get("relatedParticipants", [])}
+    loss = detail.get("distributionLossFactor") or {}
+    profile = detail.get("consumerProfile") or {}
+
+    data_points.append({
+        "measurement": "servicepoint",
+        "tags": clean_tags({
+            **tags,
+            "nmi": detail["nationalMeteringId"],
+            "jurisdiction": detail.get("jurisdictionCode"),
+            "classification": detail.get("servicePointClassification"),
+            "consumerclass": profile.get("classification")
+        }),
+        "fields": {
+            "status": detail.get("servicePointStatus", ""),
+            "threshold": profile.get("threshold", ""),
+            "isgenerator": bool(detail.get("isGenerator")),
+            "lossfactor": float(loss.get("lossValue", 0) or 0),
+            "lossfactorcode": loss.get("code", ""),
+            "lnsp": participants.get("LNSP", ""),
+            "frmp": participants.get("FRMP", "")
+        },
+        "time": f"{valid_from}T00:00:00+10:00"
+    })
+
+    # one point per register, so the network tariff each one bills against is queryable
+    for meter in detail.get("meters", []):
+        spec = meter.get("specifications") or {}
+        effective = meter.get("fromDate") or valid_from
+        for register in meter.get("registers", []):
+            data_points.append({
+                "measurement": "meter",
+                "tags": clean_tags({
+                    **tags,
+                    "meter": meter["meterId"],
+                    "register": register["registerId"],
+                    "suffix": register["registerSuffix"],
+                    "networktariff": register.get("networkTariffCode"),
+                    "consumptiontype": register.get("registerConsumptionType")
+                }),
+                "fields": {
+                    "averagedailyload": float(register.get("averagedDailyLoad", 0) or 0),
+                    "multiplier": float(register.get("multiplier", 0) or 0),
+                    "meterstatus": spec.get("status", ""),
+                    "registerstatus": register.get("status", ""),
+                    "readtype": spec.get("readType", ""),
+                    "installationtype": spec.get("installationType", ""),
+                    "timeofday": register.get("timeOfDay", ""),
+                    "controlledload": bool(register.get("controlledLoad"))
+                },
+                "time": f"{effective}T00:00:00+10:00"
+            })
     return data_points
 
 
-# get oldest last record from all tables based on measurement
-def influx_get_last(influx_client,measurement):
+# tariffPeriod carries MM-DD only, so the year comes from the plan that contains it
+def resolve_period_date(month_day, plan_start, plan_end):
+    for year in (plan_start.year, plan_end.year):
+        period_date = datetime.strptime(f"{year}-{month_day}", "%Y-%m-%d")
+        if plan_start <= period_date <= plan_end:
+            return period_date
+    return None
+
+
+# a rate point per time-of-use band, effective from the start of the period
+def rate_points(block, effective, tags):
+    data_points = []
+    for band in block.get("timeOfUseRates", []):
+        for rate in band["rates"]:
+            data_points.append({
+                "measurement": "rate",
+                "tags": {**tags, "tariff": band["displayName"], "timeofuse": band["type"]},
+                "fields": {"unitprice": float(rate["unitPrice"])},
+                "time": f"{effective.strftime('%Y-%m-%d')}T00:00:00+10:00"
+            })
+    return data_points
+
+
+# Convert a plan's rate history to InfluxDB points, clamped to the service point window
+def plan_to_points(plan, tags, window_start, window_end):
+    data_points = []
+    overview = plan["planOverview"]
+    plan_start = datetime.strptime(overview["startDate"], "%Y-%m-%d")
+    plan_end = datetime.strptime(overview["endDate"], "%Y-%m-%d")
+    contract = plan["planDetail"]["electricityContract"]
+    plan_tags = {
+        **tags,
+        "plan": overview["displayName"],
+        "pricingmodel": contract["pricingModel"]
+    }
+
+    # only keep the price applicable from the first day we hold usage for
+    def effective_from(start, end):
+        if end is not None and end.date() < window_start.date(): return None
+        if start.date() > window_end: return None
+        return max(start, window_start)
+
+    # retail service, the tariff periods that also carry the daily supply charge
+    for period in contract.get("tariffPeriod", []):
+        start = resolve_period_date(period["startDate"], plan_start, plan_end)
+        end = resolve_period_date(period["endDate"], plan_start, plan_end)
+        if start is None: continue
+        effective = effective_from(start, end)
+        if effective is None: continue
+        period_tags = {**plan_tags, "tariffclass": period["type"]}
+        data_points += rate_points(period, effective, period_tags)
+        data_points.append({
+            "measurement": "supply",
+            "tags": {**period_tags, "tariff": period["displayName"]},
+            "fields": {"dailycharge": float(period["dailySupplyCharge"])},
+            "time": f"{effective.strftime('%Y-%m-%d')}T00:00:00+10:00"
+        })
+
+    # controlled load, whose periods carry full dates rather than MM-DD
+    for load in contract.get("controlledLoad", []):
+        start = datetime.strptime(load["startDate"], "%Y-%m-%d")
+        end = datetime.strptime(load["endDate"], "%Y-%m-%d") if load.get("endDate") else None
+        effective = effective_from(start, end)
+        if effective is None: continue
+        data_points += rate_points(load, effective, {**plan_tags, "tariffclass": "CONTROLLED_LOAD"})
+
+    # discounts apply across the whole plan
+    for discount in contract.get("discounts", []):
+        if discount.get("methodUType") != "percentOfUse": continue
+        effective = effective_from(plan_start, plan_end)
+        if effective is None: continue
+        data_points.append({
+            "measurement": "discount",
+            "tags": {
+                **plan_tags,
+                "description": discount["displayName"],
+                "type": discount["type"]
+            },
+            "fields": {"percentofuse": float(discount["percentOfUse"]["rate"])},
+            "time": f"{effective.strftime('%Y-%m-%d')}T00:00:00+10:00"
+        })
+
+    return data_points
+
+
+# get oldest last record from all tables based on measurement, for one account
+def influx_get_last(influx_client, measurement, account=None):
     query_api = influx_client.query_api()
-    query = f'from(bucket: "{bucket}") |> range(start: 0) |> filter(fn: (r) => r._measurement == "{measurement}") |> last()'
+    query = f'from(bucket: "{bucket}") |> range(start: 0) |> filter(fn: (r) => r._measurement == "{measurement}")'
+    if account:
+        query += f' |> filter(fn: (r) => r.account == "{account}")'
+    query += ' |> last()'
     tables = query_api.query(query, org=org)
     return min((record.get_time() for table in tables for record in table.records), default=None)
 
@@ -130,36 +360,101 @@ def job():
     write_api = influx_client.write_api(write_options=SYNCHRONOUS)
     logger.info("Connecting to InfluxDB v2 on " + influx_client.url)
 
-    energy_token = energy_get_token(energy_login)
-    energy_account = energy_get_account(energy_token)
-    last_time = influx_get_last(influx_client, "electricity")
+    # mobile API auth: the BFF token is short lived but only the login needs it, the
+    # access token it returns lasts 24 hours and carries the rest of the run
+    mobile_session = energy_mobile_session()
+    bff_token = energy_get_bff_token(mobile_session)
+    logger.info("Got BFF token, logging in to the mobile API")
+    access_token, refresh_token = energy_mobile_login(mobile_session, bff_token, energy_login)
+    logger.info("Mobile API login succeeded")
 
-    if last_time is None:
-        next_date = start_date
-        logger.info(f"No last date found, using start_date: {next_date.strftime('%Y-%m-%d')}")
-    else:
-        next_date = last_time + timedelta(hours=10) + timedelta(minutes=5)
-        logger.info(f"Last date found, starting at: {next_date.strftime('%Y-%m-%d')}")
+    accounts = energy_get_accounts(mobile_session, access_token)
+    if os.getenv("ENERGY_ACCOUNT"):
+        accounts = [energy_select_account(accounts, os.getenv("ENERGY_ACCOUNT"))]
+    logger.info(f"Found {len(accounts)} account(s) to load")
 
-    logger.info(f"Getting offerings data")
-    offerings = energy_get_offerings(energy_account, energy_token)
-
-    # get data from 1stenergy
-    while next_date.date() < datetime.now().date():
-        logger.info(f"Getting energy data for: {next_date.date().strftime('%Y-%m-%d')}")
-        energy_data = energy_get_data(energy_account, energy_token, next_date)
-        energy_data["date"] = next_date.strftime("%Y-%m-%d")
-        data_points = energy_to_points(energy_data)
-        write_api.write(org=org, bucket=bucket, record=data_points)
-
-        logger.info(f"Setting offerings data")
-        offerings["date"] = next_date
-        data_points = offerings_to_points(offerings)
-        write_api.write(org=org, bucket=bucket, record=data_points)
-
-        next_date += timedelta(days=1)
+    # load every account, tagged so each can be filtered on its own
+    for account in accounts:
+        detail = energy_get_account_detail(mobile_session, access_token, account["accountId"])
+        for service_point in detail["servicePoints"]:
+            sync_meters(write_api, mobile_session, access_token, detail, service_point)
+            sync_plans(write_api, detail, service_point)
+            sync_usage(
+                influx_client, write_api, mobile_session, access_token, detail, service_point
+            )
 
     logger.info("Sync task complete.")
+
+
+# write the service point metadata and its meter registers
+def sync_meters(write_api, session, access_token, account, service_point):
+    tags = account_tags(account, service_point)
+    detail = energy_get_service_point(session, access_token, service_point["servicePointId"])
+    data_points = service_point_to_points(detail, tags)
+    logger.info(
+        f"NMI {detail['nationalMeteringId']}, "
+        f"{len(detail.get('meters', []))} meter(s), {len(data_points) - 1} register(s)"
+    )
+    write_api.write(org=org, bucket=bucket, record=data_points)
+
+
+# write the rate history for every plan that covers this service point
+def sync_plans(write_api, account, service_point):
+    tags = account_tags(account, service_point)
+    window_start, window_end = energy_account_window(service_point)
+    data_points = []
+    for plan in account.get("plans", []):
+        if service_point["servicePointId"] not in plan.get("servicePointIds", []):
+            continue
+        data_points += plan_to_points(plan, tags, window_start, window_end)
+    logger.info(f"Writing {len(data_points)} rate history points")
+    if data_points:
+        write_api.write(org=org, bucket=bucket, record=data_points)
+
+
+# the first of the month after the one the given date falls in
+def next_month(date):
+    return (date.replace(day=28) + timedelta(days=4)).replace(day=1)
+
+
+# load one service point's interval usage, picking up where its own tags left off
+def sync_usage(influx_client, write_api, session, access_token, account, service_point):
+    tags = account_tags(account, service_point)
+    window_start, window_end = energy_account_window(service_point)
+    logger.info(
+        f"Account {tags['account']} / service point {tags['servicepoint']} ({tags['site']}), "
+        f"window {window_start.strftime('%Y-%m-%d')} to {window_end.strftime('%Y-%m-%d')}"
+    )
+
+    last_time = influx_get_last(influx_client, "electricity", tags["account"])
+    if last_time is None:
+        resume = window_start
+        logger.info(f"No last date found, using window start: {resume.strftime('%Y-%m-%d')}")
+    else:
+        resume = last_time + timedelta(hours=10)
+        logger.info(f"Last date found, starting at: {resume.strftime('%Y-%m-%d')}")
+
+    # a monthly window returns a whole calendar month of half-hourly intervals in one
+    # call, so refetch from the first of the resume month and let the writes overwrite
+    month = max(resume, window_start).replace(day=1)
+    while month.date() <= window_end:
+        date = month.strftime("%Y-%m-%d")
+        logger.info(f"Getting usage for: {month.strftime('%Y-%m')}")
+        uncosted = energy_get_usage(
+            session, access_token, account["accountId"], service_point["servicePointId"],
+            date, monthly=True, costed=False
+        )
+        costed = energy_get_usage(
+            session, access_token, account["accountId"], service_point["servicePointId"],
+            date, monthly=True, costed=True
+        )
+        if not usage_window(uncosted).get("metadata", {}).get("has_data"):
+            logger.info("No data in this window")
+        else:
+            data_points = usage_to_points(uncosted, costed, tags)
+            logger.info(f"Writing {len(data_points)} usage points")
+            write_api.write(org=org, bucket=bucket, record=data_points)
+        month = next_month(month)
 
 
 # Configure logging
